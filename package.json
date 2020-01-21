@@ -3,13 +3,14 @@
   "version": "1.6.0",
   "description": "shopify theme deployment utility",
   "main": "index.js",
-  "bin": {
-    "slater-sync": "./cli.js"
-  },
   "scripts": {
     "publish": "npm publish --access public",
     "test": "NODE_ENV=testing ava ./tests/*.test.js --verbose"
   },
+  "files": [
+    "lib",
+    "index.js"
+  ],
   "keywords": [
     "shopify",
     "themekit",
