@@ -1,213 +1,174 @@
-const fs = require('fs-extra')
-const path = require('path')
-const assert = require('assert')
-const exit = require('exit')
-const c = require('ansi-colors')
-const wait = require('w2t')
-const fetch = require('node-fetch')
-const readdir = require('recursive-readdir')
-const yaml = require('yaml').default
+const fs = require("fs-extra");
+const fetch = require("node-fetch");
+const readdir = require("recursive-readdir");
+const mm = require("micromatch");
 
-const {
-  logger,
-  abs,
-  sanitize
-} = require('@slater/util')
+const { cleanPath, getFileKey } = require("@slater/util");
 
-const pkg = require('./package.json')
+const mergeConfig = require("./lib/mergeConfig.js");
+const enqueue = require("./lib/enqueue.js");
 
-const log = logger('slater')
+function encodeFile(file) {
+  return Buffer.from(fs.readFileSync(file), "utf-8").toString("base64");
+}
 
-module.exports = function init (config) {
-  if (!config.id) {
-    log.error(`theme id is missing from config`)
-    exit()
-  }
-
-  if (!config.password) {
-    log.error(`theme API password is missing from config`)
-    exit()
-  }
-
-  if (!config.store) {
-    log.error(`store url is missing from config`)
-    exit()
-  }
-
-  /**
-   * filled on each sync request, emptied when successful
-   */
-  let queue = []
-
-  function createProgressCallback (cb) {
-    return total => remaining => cb && cb(total, remaining)
-  }
-
-  function api (method, body) {
-    return fetch(`https://${config.store}/admin/themes/${config.id}/assets.json`, {
-      method,
-      headers: {
-        'X-Shopify-Access-Token': config.password,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify(body)
-    })
-  }
-
-  function upload ({ key, file }) {
-    const encoded = Buffer.from(fs.readFileSync(file), 'utf-8').toString('base64')
-
-    return api('PUT', {
-      asset: {
-        key,
-        attachment: encoded
+function createStoreConnection(config) {
+  return function storeAPI(method, asset) {
+    return fetch(
+      `https://${config.store}/admin/themes/${config.id}/assets.json`,
+      {
+        method,
+        headers: {
+          "X-Shopify-Access-Token": config.password,
+          "Content-Type": "application/json",
+          Accept: "application/json"
+        },
+        body: JSON.stringify({ asset })
       }
-    })
-      .then(res => res ? res.json() : {})
-      .then(({ errors, asset }) => {
-        if (errors) {
-          throw {
-            key,
-            errors
-          }
-        }
+    );
+  };
+}
 
-        return {
-          key,
-          asset
-        }
-      })
+module.exports = function create(conf) {
+  const events = {};
+  const config = mergeConfig(conf);
+  const store = createStoreConnection(config);
+
+  function emit(event, ...data) {
+    (events[event] || []).map(cb => cb(...data));
   }
 
-  function remove ({ key }) {
-    return api('DELETE', {
-      asset: { key }
-    })
-      .then(res => res ? res.json() : {})
-      .then(({ errors, asset }) => {
-        if (errors) {
-          throw {
-            key,
-            errors
-          }
-        }
+  // return undefined if critical errors
+  async function handleResponse(raw) {
+    try {
+      const res = raw.clone();
+      const { errors, asset } = await res.json();
 
-        return {
-          key,
-          asset
+      const data = {
+        errors,
+        asset
+      };
+
+      if (errors) {
+        if (errors === "Not Found") {
+          emit(
+            "error",
+            `Store URL was invalid. Please double check your config.`
+          );
+          return;
+        } else {
+          emit("error", errors, data); // for file error
         }
-      })
+      }
+
+      return data;
+    } catch (e) {
+      const res = raw.clone();
+
+      if (res.status === 404) {
+        emit("error", `Theme ID was invalid. Please double check your config.`);
+      } else if (res.status === 401) {
+        emit(
+          "error",
+          `Theme password was invalid. Please double check your config.`
+        );
+      }
+    }
   }
 
-  function enqueue (action, cb) {
-    return new Promise((res, rej) => {
-      ;(function push (p) {
-        if (!p) res()
-
-        wait(500, [
-          action(p)
-        ])
-          .then(() => {
-            cb && cb(queue.length)
-            if (queue.length) return push(queue.pop())
-            res()
-          })
-          .catch(e => {
-            cb && cb(queue.length)
-            if (queue.length) return push(queue.pop())
-            rej(e)
-          })
-      })(queue.pop())
-    })
+  async function upload(fileAsset) {
+    const raw = await store("PUT", fileAsset);
+    return handleResponse(raw);
   }
 
-  function sync (paths = [], cb) {
-    paths = [].concat(paths)
-    paths = paths.length ? paths : ['.']
-    paths = paths.map(p => abs(p))
+  async function remove(fileAsset) {
+    const raw = await store("DELETE", fileAsset);
+    return handleResponse(raw);
+  }
 
-    const deploy = fs.lstatSync(paths[0]).isDirectory()
-    const ignored = config.ignore
+  async function getFiles(paths) {
+    if (!paths || !paths.length) paths = ".";
 
-    return new Promise((res, rej) => {
-      if (deploy) {
-        readdir(abs(paths[0]), ignored, (e, files) => {
-          if (e) {
-            log.error(e.message || e)
-            exit()
+    const files = [].concat(paths || []).map(cleanPath);
+
+    let flatFiles = [];
+
+    for (const file of files) {
+      try {
+        let isDir = false;
+
+        try {
+          // allows for unsyncing files from remote that are not present locally
+          isDir = fs.lstatSync(file).isDirectory();
+        } catch (e) {}
+
+        if (isDir) {
+          try {
+            const files = await readdir(file, config.ignored);
+            flatFiles = flatFiles.concat(files);
+          } catch (e) {
+            emit("error", e.message, e);
           }
+        } else {
+          flatFiles = flatFiles.concat(file);
+        }
+      } catch (e) {
+        emit("error", e.message, e);
+      }
+    }
 
-          queue = files.map(file => ({
-            key: sanitize(file),
-            file
-          })).filter(f => f.key)
+    return flatFiles.filter(file => !mm.contains(file, config.ignore));
+  }
 
-          queue.reduce((_, f) => {
-            if (_.indexOf(f.key) > -1) {
-              const dirs = files
-                .map(f => f.replace(process.cwd(), ''))
-                .reduce((_, f) => {
-                  const frag = f.split('/')[1]
-                  if (_.indexOf(frag) > -1) return _
-                  return _.concat(frag)
-                }, [])
-                .filter(f => fs.lstatSync(f).isDirectory())
-
-              log.error(
-                [
-                  `plz only specify one theme directory\n`
-                ].concat(dirs.map(dir => (
-                  `  ${log.colors.gray('>')} ${dir}/\n`
-                ))).join('')
-              )
-
-              exit()
-            }
-            return _.concat(f.key)
-          }, [])
-
-          if (!queue.length) res()
-
-          res(enqueue(
-            upload,
-            createProgressCallback(cb)(queue.length)
-          ))
+  async function sync(paths) {
+    return Promise.all(
+      (await getFiles(paths))
+        .map(file => {
+          try {
+            return {
+              key: getFileKey(file),
+              attachment: encodeFile(file)
+            };
+          } catch (e) {
+            emit("error", e.message, e);
+            return null;
+          }
         })
-      } else {
-        queue = paths.map(file => ({
-          key: sanitize(file),
-          file
-        })).filter(f => f.key)
-
-        if (!queue.length) {
-          log.info('syncing', `nothing was synced`)
-          res()
-          return
-        }
-
-        res(enqueue(
-          upload,
-          createProgressCallback(cb)(queue.length)
-        ))
-      }
-    })
+        .filter(Boolean)
+        .map(asset =>
+          enqueue(async () => {
+            const res = await upload(asset);
+            if (res) emit("sync", res);
+            return res;
+          })
+        )
+    );
   }
 
-  function unsync (paths = [], cb) {
-    queue = [].concat(paths).map(p => ({
-      key: sanitize(p)
-    })).filter(f => f.key)
-
-    return Promise.resolve(enqueue(
-      remove,
-      createProgressCallback(cb)(queue.length)
-    ))
+  async function unsync(paths) {
+    return Promise.all(
+      (await getFiles(paths))
+        .map(file => ({
+          key: getFileKey(file)
+        }))
+        .map(asset =>
+          enqueue(async () => {
+            const res = await remove(asset);
+            if (res) emit("unsync", res);
+            return res;
+          })
+        )
+    );
   }
 
   return {
     sync,
     unsync,
-    config
-  }
-}
+    on(event, cb) {
+      events[event] = (events[event] || []).concat(cb);
+      return () => {
+        events[event].splice(events[event].indexOf(cb), 1);
+      };
+    }
+  };
+};

@@ -7,7 +7,8 @@
     "slater-sync": "./cli.js"
   },
   "scripts": {
-    "publish": "npm publish --access public"
+    "publish": "npm publish --access public",
+    "test": "NODE_ENV=testing ava ./tests/*.test.js --verbose"
   },
   "keywords": [
     "shopify",
@@ -18,18 +19,21 @@
   "license": "MIT",
   "homepage": "https://github.com/the-couch/slater#readme",
   "dependencies": {
-    "@slater/util": "^1.6.0",
+    "@slater/util": "^2.0.2",
     "ansi-colors": "^3.0.4",
     "exit": "^0.1.2",
     "fs-extra": "^7.0.1",
     "log-update": "^2.3.0",
-    "micromatch": "^3.1.10",
+    "micromatch": "^4.0.2",
     "node-fetch": "^2.2.0",
     "parse-gitignore": "^1.0.1",
     "recursive-readdir": "^2.2.2",
-    "w2t": "0.0.2",
+    "w2t": "^2.0.2",
     "yaml": "^1.2.1",
     "zip-folder": "^1.0.0"
   },
-  "gitHead": "3efcf640b15bfcbecbba4b4181a6826efa9b6f7e"
+  "gitHead": "3efcf640b15bfcbecbba4b4181a6826efa9b6f7e",
+  "devDependencies": {
+    "ava": "^3.0.0"
+  }
 }
