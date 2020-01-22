@@ -1,6 +1,6 @@
 {
   "name": "@slater/sync",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "A component of the slater Shopify theme toolkit.",
   "main": "index.js",
   "scripts": {
